@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>leveldb arena // GrayMissing&#39;s blog</title>
+
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+    <meta property="og:title" content="leveldb arena" />
+<meta property="og:description" content="" />
+<meta property="og:type" content="website" />
+<meta property="og:locale" content="en_US" />
+<meta property="og:url" content="https://graymissing.github.io/post/leveldb-arena/" />
+
+
+    <link href="" rel="alternate" type="application/rss+xml" title="GrayMissing&#39;s blog" />
+    <link rel="shortcut icon" href="/favicon.png">
+
+    <link href="https://graymissing.github.io/webfonts/ptserif/main.css" rel='stylesheet' type='text/css'>
+    <link href="https://graymissing.github.io/webfonts/source-code-pro/main.css" rel="stylesheet" type="text/css">
+
+    <link rel="stylesheet" href="https://graymissing.github.io/css/style.css">
+
+    <link href="http://gmpg.org/xfn/11" rel="profile">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+
+    
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+
+    <meta name="description" content="">
+    <meta name="keywords" content="">
+    <meta name="author" content="">
+
+    <meta name="generator" content="Hugo 0.21-DEV" />
+</head>
+
+
+<body>
+<div id="container">
+    <header id="header">
+    <div id="header-outer" class="outer">
+        <div id="header-inner" class="inner">
+            <a id="main-nav-toggle" class="nav-icon" href="javascript:;"></a>
+            <a id="logo" class="logo-text" href="https://graymissing.github.io/">GrayMissing&#39;s blog</a>
+            <nav id="main-nav">
+                
+                <a class="main-nav-link" href="/categories/">categories</a>
+                
+                <a class="main-nav-link" href="/tags/">tags</a>
+                
+            </nav>
+            <nav id="sub-nav">
+                <div id="search-form-wrap">
+                </div>
+            </nav>
+        </div>
+    </div>
+</header>
+
+    <section id="main" class="outer">
+        <article class="article article-type-post" itemscope itemprop="blogPost">
+    <div class="article-inner">
+        
+        <header class="article-header">
+            <h1 class="article-title" itemprop="name">leveldb arena</h1>
+        </header>
+        
+        <div class="article-meta">
+            <a href="/post/leveldb-arena/" class="article-date">
+                <time datetime='2017-05-04T15:22:03.000&#43;08:00' itemprop="datePublished">2017-05-04</time>
+            </a>
+            
+            
+            <div class="post-categories">
+                <div class="article-category">
+                    
+                    
+                    <a class="article-category-link" href="https://graymissing.github.io//categories/leveldb">leveldb</a>
+                    
+                </div>
+            </div>
+            
+            
+            <div class="article-comment-link-wrap">
+                <a href="/post/leveldb-arena/#disqus_thread" class="article-comment-link">Comments</a>
+            </div>
+            
+        </div>
+        <div class="article-entry" itemprop="articleBody">
+            <h2 id="arena">arena</h2>
+
+<h3 id="a-simple-memery-pool">a simple memery pool</h3>
+
+<p></p>
+
+<h4 id="结构">结构</h4>
+
+<pre><code class="language-c++">class Arena {
+  // Allocation state
+  char* alloc_ptr_;  // 指向当前可分配的空间
+  size_t alloc_bytes_remaining_; // 当前块剩余可分配的空间
+  // Array of new[] allocated memory blocks
+  std::vector&lt;char*&gt; blocks_; // 所有历史创建的块
+  // ...
+}
+
+</code></pre>
+
+<h4 id="构造函数">构造函数</h4>
+
+<pre><code class="language-c++">Arena::Arena() : memory_usage_(0) {
+  alloc_ptr_ = NULL;  // First allocation will allocate a block
+  alloc_bytes_remaining_ = 0;
+}
+</code></pre>
+
+<h4 id="析构函数">析构函数</h4>
+
+<pre><code class="language-c++">Arena::~Arena() {
+  for (size_t i = 0; i &lt; blocks_.size(); i++) {
+    delete[] blocks_[i];
+  }
+}
+</code></pre>
+
+<h4 id="获取内存">获取内存</h4>
+
+<pre><code class="language-c++">inline char* Arena::Allocate(size_t bytes) {
+  // The semantics of what to return are a bit messy if we allow
+  // 0-byte allocations, so we disallow them here (we don't need
+  // them for our internal use).
+  assert(bytes &gt; 0);
+  if (bytes &lt;= alloc_bytes_remaining_) {
+    char* result = alloc_ptr_;
+    alloc_ptr_ += bytes;
+    alloc_bytes_remaining_ -= bytes;
+    return result;
+  }
+  return AllocateFallback(bytes);
+}
+</code></pre>
+
+<h4 id="获取一块对齐的内存">获取一块对齐的内存</h4>
+
+<pre><code class="language-c++">char* Arena::AllocateAligned(size_t bytes) {
+  const int align = (sizeof(void*) &gt; 8) ? sizeof(void*) : 8;
+  assert((align &amp; (align-1)) == 0);   // Pointer size should be a power of 2
+  size_t current_mod = reinterpret_cast&lt;uintptr_t&gt;(alloc_ptr_) &amp; (align-1);
+  size_t slop = (current_mod == 0 ? 0 : align - current_mod);
+  size_t needed = bytes + slop;
+  char* result;
+  if (needed &lt;= alloc_bytes_remaining_) {
+    result = alloc_ptr_ + slop;
+    alloc_ptr_ += needed;
+    alloc_bytes_remaining_ -= needed;
+  } else {
+    // AllocateFallback always returned aligned memory
+    result = AllocateFallback(bytes);
+  }
+  assert((reinterpret_cast&lt;uintptr_t&gt;(result) &amp; (align-1)) == 0);
+  return result;
+}
+</code></pre>
+
+<h4 id="获取内存失败-重新申请一块">获取内存失败, 重新申请一块</h4>
+
+<pre><code class="language-c++">char* Arena::AllocateFallback(size_t bytes) {
+  if (bytes &gt; kBlockSize / 4) {
+    // Object is more than a quarter of our block size.  Allocate it separately
+    // to avoid wasting too much space in leftover bytes.
+    char* result = AllocateNewBlock(bytes);
+    return result;
+  }
+
+  // We waste the remaining space in the current block.
+  alloc_ptr_ = AllocateNewBlock(kBlockSize);
+  alloc_bytes_remaining_ = kBlockSize;
+
+  char* result = alloc_ptr_;
+  alloc_ptr_ += bytes;
+  alloc_bytes_remaining_ -= bytes;
+  return result;
+}
+</code></pre>
+
+<h4 id="获取一块新的内存">获取一块新的内存</h4>
+
+<pre><code class="language-c++">char* Arena::AllocateNewBlock(size_t block_bytes) {
+  char* result = new char[block_bytes];
+  blocks_.push_back(result);
+  memory_usage_.NoBarrier_Store(
+      reinterpret_cast&lt;void*&gt;(MemoryUsage() + block_bytes + sizeof(char*)));
+  return result;
+}
+</code></pre>
+
+<h3 id="总结">总结</h3>
+
+<p>arena是一个简单的内存池,简单在于没有考虑任何复用和回收的问题,并且对于空间的利用率不是很高,优点在于大量的占用空间小的值的分配速度</p>
+        </div>
+
+        
+        
+        <div class="article-toc" style="display:none;">
+            <h3>Contents</h3>
+            <nav id="TableOfContents">
+<ul>
+<li>
+<ul>
+<li><a href="#arena">arena</a>
+<ul>
+<li><a href="#a-simple-memery-pool">a simple memery pool</a>
+<ul>
+<li><a href="#结构">结构</a></li>
+<li><a href="#构造函数">构造函数</a></li>
+<li><a href="#析构函数">析构函数</a></li>
+<li><a href="#获取内存">获取内存</a></li>
+<li><a href="#获取一块对齐的内存">获取一块对齐的内存</a></li>
+<li><a href="#获取内存失败-重新申请一块">获取内存失败, 重新申请一块</a></li>
+<li><a href="#获取一块新的内存">获取一块新的内存</a></li>
+</ul></li>
+<li><a href="#总结">总结</a></li>
+</ul></li>
+</ul></li>
+</ul>
+</nav>
+        </div>
+        
+        
+
+        
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.1.1/jquery.slim.min.js" integrity="sha256-/SIrNqv8h6QGKDuNoLGA4iret+kyesCkHGzVUUV0shc=" crossorigin="anonymous"></script>
+        <script>
+            (function() {
+                var $toc = $('#TableOfContents');
+                if ($toc.length > 0) {
+                    var $window = $(window);
+
+                    function onScroll(){
+                        var currentScroll = $window.scrollTop();
+                        var h = $('.article-entry h1, .article-entry h2, .article-entry h3, .article-entry h4, .article-entry h5, .article-entry h6');
+                        var id = "";
+                        h.each(function (i, e) {
+                            e = $(e);
+                            if (e.offset().top - 10 <= currentScroll) {
+                                id = e.attr('id');
+                            }
+                        });
+                        var active = $toc.find('a.active');
+                        if (active.length == 1 && active.eq(0).attr('href') == '#' + id) return true;
+
+                        active.each(function (i, e) {
+                            $(e).removeClass('active').siblings('ul').hide();
+                        });
+                        $toc.find('a[href="#' + id + '"]').parentsUntil('#TableOfContents').each(function (i, e) {
+                            $(e).children('a').addClass('active').siblings('ul').show();
+                        });
+                    }
+
+                    $window.on('scroll', onScroll);
+                    $(document).ready(function() {
+                        $toc.find('a').parent('li').find('ul').hide();
+                        onScroll();
+                        document.getElementsByClassName('article-toc')[0].style.display = '';
+                    });
+                }
+            })();
+        </script>
+        
+
+
+        
+        <footer class="article-footer">
+            <ul class="article-tag-list">
+                
+                <li class="article-tag-list-item">
+                    <a class="article-tag-list-link" href="https://graymissing.github.io//tags/leveldb">leveldb
+                    </a>
+                </li>
+                
+            </ul>
+        </footer>
+        
+    </div>
+    <nav id="article-nav">
+    
+    <a href="/post/leveldb-skiplist/" id="article-nav-newer" class="article-nav-link-wrap">
+        <div class="article-nav-title"><span>&lt;</span>&nbsp;
+            leveldb skiplist
+        </div>
+    </a>
+    
+    
+</nav>
+</article>
+
+        
+            <div id="disqus_thread"></div>
+<script type="text/javascript">
+    var disqus_shortname = 'graymissing';
+    var disqus_identifier = 'https:\/\/graymissing.github.io\/post\/leveldb-arena\/';
+    var disqus_title = 'leveldb arena';
+    var disqus_url = 'https:\/\/graymissing.github.io\/post\/leveldb-arena\/';
+
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+        
+    </section>
+    <footer id="footer">
+    <div class="outer">
+        <div id="footer-info" class="inner">
+            &copy; 2017 GrayMissing&#39;s blog&nbsp;
+            Powered by <a href="https://gohugo.io" target="_blank">Hugo</a> with theme <a href="https://github.com/carsonip/hugo-theme-minos">Minos</a>
+        </div>
+    </div>
+    
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.9.0/styles/tomorrow-night.min.css" integrity="sha256-2wL88NKUqvJi/ExflDzkzUumjUM73mcK2gBvBBeLvTk=" crossorigin="anonymous" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.9.0/highlight.min.js" integrity="sha256-KbfTjB0WZ8vvXngdpJGY3Yp3xKk+tttbqClO11anCIU=" crossorigin="anonymous"></script>
+    <script>hljs.initHighlightingOnLoad();</script>
+
+    
+    <script>
+        document.getElementById('main-nav-toggle').addEventListener('click', function () {
+            var header = document.getElementById('header');
+            if (header.classList.contains('mobile-on')) {
+                header.classList.remove('mobile-on');
+            } else {
+                header.classList.add('mobile-on');
+            }
+        });
+    </script>
+</footer>
+</div>
+</body>
+</html>
